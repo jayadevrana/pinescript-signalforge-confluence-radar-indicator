@@ -1,0 +1,156 @@
+//@version=6
+indicator("SignalForge Confluence Radar [Signal Forge]", shorttitle="Confluence Radar", overlay=true, max_lines_count=300, max_labels_count=200)
+
+groupCore = "Core"
+fastLen = input.int(21, "Fast EMA", minval=2, group=groupCore)
+slowLen = input.int(89, "Slow EMA", minval=5, group=groupCore)
+vwmaLen = input.int(34, "VWMA Anchor", minval=2, group=groupCore)
+rsiLen = input.int(14, "RSI Length", minval=2, group=groupCore)
+volumeLen = input.int(20, "Volume Baseline", minval=2, group=groupCore)
+breakoutLen = input.int(20, "Breakout Window", minval=5, group=groupCore)
+sweepLookback = input.int(12, "Sweep Lookback", minval=3, group=groupCore)
+minScore = input.float(75.0, "Minimum Grade Score", minval=40.0, maxval=100.0, step=1.0, group=groupCore)
+ladderBars = input.int(28, "Target Projection Bars", minval=5, maxval=200, group=groupCore)
+
+groupDisplay = "Display"
+showTargets = input.bool(true, "Show Trade Ladders", group=groupDisplay)
+showDashboard = input.bool(true, "Show Score Radar", group=groupDisplay)
+
+bullCore = color.rgb(0, 214, 175)
+bullGlow = color.rgb(143, 255, 226)
+bearCore = color.rgb(255, 90, 122)
+bearGlow = color.rgb(255, 194, 108)
+neutralCore = color.rgb(122, 134, 154)
+
+f_push_line(array<line> bucket, line item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        line.delete(array.shift(bucket))
+
+f_push_label(array<label> bucket, label item, int keep) =>
+    array.push(bucket, item)
+    if array.size(bucket) > keep
+        label.delete(array.shift(bucket))
+
+f_grade(float score) =>
+    score >= 90.0 ? "A+" : score >= 80.0 ? "A" : score >= 70.0 ? "B" : "Watch"
+
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+anchor = ta.vwma(close, vwmaLen)
+rsi = ta.rsi(close, rsiLen)
+[macdLine, signalLine, macdHist] = ta.macd(close, 12, 26, 9)
+atr = ta.atr(14)
+volumePulse = volume / math.max(ta.sma(volume, volumeLen), 1.0)
+rangeHigh = ta.highest(high, breakoutLen)
+rangeLow = ta.lowest(low, breakoutLen)
+compression = atr / math.max(ta.sma(atr, 30), syminfo.mintick) < 0.90
+
+priorRangeHigh = rangeHigh[1]
+priorRangeLow = rangeLow[1]
+hasRange = not na(priorRangeHigh) and not na(priorRangeLow)
+priorLowest = ta.lowest(low, sweepLookback)[1]
+priorHighest = ta.highest(high, sweepLookback)[1]
+
+upperBreak = hasRange and close > priorRangeHigh
+lowerBreak = hasRange and close < priorRangeLow
+sweepLow = not na(priorLowest) and low < priorLowest and close > open
+sweepHigh = not na(priorHighest) and high > priorHighest and close < open
+
+trendLong = close > slow and fast > slow
+trendShort = close < slow and fast < slow
+momentumLong = rsi > 52.0 and macdHist > 0.0
+momentumShort = rsi < 48.0 and macdHist < 0.0
+participationLong = volumePulse > 1.10 and close > anchor
+participationShort = volumePulse > 1.10 and close < anchor
+releaseLong = upperBreak and compression[1]
+releaseShort = lowerBreak and compression[1]
+structureLong = sweepLow or (hasRange and close > anchor and close > (priorRangeHigh + priorRangeLow) * 0.5)
+structureShort = sweepHigh or (hasRange and close < anchor and close < (priorRangeHigh + priorRangeLow) * 0.5)
+
+trendLongScore = trendLong ? 30.0 : 0.0
+trendShortScore = trendShort ? 30.0 : 0.0
+momentumLongScore = momentumLong ? 20.0 : 0.0
+momentumShortScore = momentumShort ? 20.0 : 0.0
+participationLongScore = participationLong ? 15.0 : 0.0
+participationShortScore = participationShort ? 15.0 : 0.0
+releaseLongScore = releaseLong ? 15.0 : 0.0
+releaseShortScore = releaseShort ? 15.0 : 0.0
+structureLongScore = structureLong ? 20.0 : 0.0
+structureShortScore = structureShort ? 20.0 : 0.0
+
+longScore = trendLongScore + momentumLongScore + participationLongScore + releaseLongScore + structureLongScore
+shortScore = trendShortScore + momentumShortScore + participationShortScore + releaseShortScore + structureShortScore
+
+longSignal = longScore >= minScore and longScore > shortScore + 15.0 and (upperBreak or sweepLow or ta.crossover(close, fast)) and not (longScore[1] >= minScore and longScore[1] > shortScore[1] + 15.0)
+shortSignal = shortScore >= minScore and shortScore > longScore + 15.0 and (lowerBreak or sweepHigh or ta.crossunder(close, fast)) and not (shortScore[1] >= minScore and shortScore[1] > longScore[1] + 15.0)
+
+var array<line> ladders = array.new_line()
+var array<label> callouts = array.new_label()
+var table dash = table.new(position.middle_right, 3, 7, bgcolor=color.new(color.black, 58), frame_color=color.new(color.white, 70), frame_width=1)
+
+if longSignal
+    stop = close - atr * 1.20
+    risk = close - stop
+    target1 = close + risk * 1.00
+    target2 = close + risk * 1.80
+    target3 = close + risk * 2.80
+    if showTargets
+        f_push_line(ladders, line.new(x1=bar_index, y1=close, x2=bar_index + ladderBars, y2=close, xloc=xloc.bar_index, color=color.new(color.white, 50), style=line.style_dotted), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=stop, x2=bar_index + ladderBars, y2=stop, xloc=xloc.bar_index, color=color.new(bearCore, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target1, x2=bar_index + ladderBars, y2=target1, xloc=xloc.bar_index, color=color.new(bullGlow, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target2, x2=bar_index + ladderBars, y2=target2, xloc=xloc.bar_index, color=color.new(bullCore, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target3, x2=bar_index + ladderBars, y2=target3, xloc=xloc.bar_index, color=color.new(color.aqua, 0), width=2), 60)
+    f_push_label(callouts, label.new(x=bar_index, y=low - atr * 0.70, text=f_grade(longScore) + " LONG\nScore " + str.tostring(longScore, "#"), style=label.style_label_up, color=bullGlow, textcolor=color.black, size=size.small), 50)
+
+if shortSignal
+    stop = close + atr * 1.20
+    risk = stop - close
+    target1 = close - risk * 1.00
+    target2 = close - risk * 1.80
+    target3 = close - risk * 2.80
+    if showTargets
+        f_push_line(ladders, line.new(x1=bar_index, y1=close, x2=bar_index + ladderBars, y2=close, xloc=xloc.bar_index, color=color.new(color.white, 50), style=line.style_dotted), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=stop, x2=bar_index + ladderBars, y2=stop, xloc=xloc.bar_index, color=color.new(bullCore, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target1, x2=bar_index + ladderBars, y2=target1, xloc=xloc.bar_index, color=color.new(bearGlow, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target2, x2=bar_index + ladderBars, y2=target2, xloc=xloc.bar_index, color=color.new(bearCore, 0), width=2), 60)
+        f_push_line(ladders, line.new(x1=bar_index, y1=target3, x2=bar_index + ladderBars, y2=target3, xloc=xloc.bar_index, color=color.new(color.red, 0), width=2), 60)
+    f_push_label(callouts, label.new(x=bar_index, y=high + atr * 0.70, text=f_grade(shortScore) + " SHORT\nScore " + str.tostring(shortScore, "#"), style=label.style_label_down, color=bearGlow, textcolor=color.black, size=size.small), 50)
+
+fastPlot = plot(fast, "Fast", color=color.new(bullCore, 10), linewidth=2)
+slowPlot = plot(slow, "Slow", color=color.new(bearCore, 10), linewidth=3)
+anchorPlot = plot(anchor, "VWMA Anchor", color=color.new(color.white, 30), linewidth=2)
+fill(fastPlot, slowPlot, color=color.new(longScore > shortScore ? bullCore : bearCore, 88))
+
+bgcolor(longScore > shortScore and longScore >= 55.0 ? color.new(bullCore, 94) : shortScore > longScore and shortScore >= 55.0 ? color.new(bearCore, 94) : na)
+barcolor(longScore > shortScore ? color.new(bullCore, 35) : shortScore > longScore ? color.new(bearCore, 35) : color.new(neutralCore, 55))
+plotshape(longSignal, title="Radar Long", style=shape.diamond, location=location.belowbar, color=bullGlow, size=size.tiny, text="A+", textcolor=color.black)
+plotshape(shortSignal, title="Radar Short", style=shape.diamond, location=location.abovebar, color=bearGlow, size=size.tiny, text="A+", textcolor=color.black)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "RADAR", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, "LONG", text_color=bullGlow, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 2, 0, "SHORT", text_color=bearGlow, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 0, 1, "Trend", text_color=color.white)
+    table.cell(dash, 1, 1, str.tostring(trendLongScore, "#"), text_color=trendLong ? bullGlow : neutralCore)
+    table.cell(dash, 2, 1, str.tostring(trendShortScore, "#"), text_color=trendShort ? bearGlow : neutralCore)
+    table.cell(dash, 0, 2, "Momentum", text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(momentumLongScore, "#"), text_color=momentumLong ? bullGlow : neutralCore)
+    table.cell(dash, 2, 2, str.tostring(momentumShortScore, "#"), text_color=momentumShort ? bearGlow : neutralCore)
+    table.cell(dash, 0, 3, "Volume", text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(participationLongScore, "#"), text_color=participationLong ? bullGlow : neutralCore)
+    table.cell(dash, 2, 3, str.tostring(participationShortScore, "#"), text_color=participationShort ? bearGlow : neutralCore)
+    table.cell(dash, 0, 4, "Release", text_color=color.white)
+    table.cell(dash, 1, 4, str.tostring(releaseLongScore, "#"), text_color=releaseLong ? bullGlow : neutralCore)
+    table.cell(dash, 2, 4, str.tostring(releaseShortScore, "#"), text_color=releaseShort ? bearGlow : neutralCore)
+    table.cell(dash, 0, 5, "Structure", text_color=color.white)
+    table.cell(dash, 1, 5, str.tostring(structureLongScore, "#"), text_color=structureLong ? bullGlow : neutralCore)
+    table.cell(dash, 2, 5, str.tostring(structureShortScore, "#"), text_color=structureShort ? bearGlow : neutralCore)
+    table.cell(dash, 0, 6, "Grade", text_color=color.white)
+    table.cell(dash, 1, 6, f_grade(longScore) + " " + str.tostring(longScore, "#"), text_color=longScore >= minScore ? bullGlow : neutralCore)
+    table.cell(dash, 2, 6, f_grade(shortScore) + " " + str.tostring(shortScore, "#"), text_color=shortScore >= minScore ? bearGlow : neutralCore)
+
+if barstate.islast and not showDashboard
+    for row = 0 to 6
+        for col = 0 to 2
+            table.cell(dash, col, row, "", bgcolor=color.new(color.black, 100))
